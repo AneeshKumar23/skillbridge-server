@@ -1,0 +1,35 @@
+# Python virtual environment
+.venv
+venv
+
+# Compiled bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git
+.git
+.gitignore
+
+# OS/system files
+.DS_Store
+Thumbs.db
+
+# IDE/project config
+.vscode/
+.idea/
+*.swp
+
+# Environment/config files
+.env
+*.log
+
+# Testing/cache
+.pytest_cache/
+coverage/
+htmlcov/
+
+# Docker-related
+Dockerfile
+docker-compose.yml
