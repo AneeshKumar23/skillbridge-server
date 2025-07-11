@@ -1,15 +1,15 @@
 from googleapiclient.discovery import build
-from google import genai
+import google.generativeai as genai
 from dotenv import load_dotenv
 import os
 import json
 from PIL import Image, ImageDraw, ImageFont
 import random
 
-
 load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel(model_name=os.getenv("MODEL_NAME", "gemini-pro"))
 
 def search_youtube(query, max_results=5):
     YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")

@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-from fastapi import Request, HTTPException
-from google import genai
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
+import google.generativeai as genai
 import uuid
 import json
 import os
@@ -12,18 +14,20 @@ from model import *
 from utils import *
 from config import *
 
+
+
+
 # ----- Load Environment Variables -----
 load_dotenv()
 MONGO_URL = os.getenv("MONGO_URL")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# ----- FastAPI App Initialization -----
+genai.configure(api_key="")
+# ---- FastAPI App Setup ----
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Update for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,15 +35,34 @@ app.add_middleware(
 
 app.mount("/generated", StaticFiles(directory="generated"), name="generated")
 
-# ----- MongoDB Setup -----
+# ---- MongoDB Setup ----
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DATABASE_NAME]
 users_collection = db["users"]
 prompts_collection = db["user_prompts"]
 outputs_collection = db["user_outputs"]
 
+# ---- Pydantic Models ----
+class SkillSuggestionRequest(BaseModel):
+    prompt: str
 
-# ----- Services -----
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    first_name: str
+    last_name: str
+
+class OnboardingUpdate(BaseModel):
+    language: str
+    skills: List[str]
+    street_address: str
+    city: str
+    state: str
+    zip_code: str
+    country: str
+
+# ---- Services ----
 class UserService:
     @staticmethod
     async def get_user(user_id: str):
@@ -95,7 +118,7 @@ class OutputService:
             return doc
         return {"id": user_id, "outputs": []}
 
-# ----- Routes: User Management -----
+# ---- Routes: User Management ----
 @app.post("/users/")
 async def create_user(user: UserCreate):
     return await UserService.create_user(user)
@@ -104,7 +127,7 @@ async def create_user(user: UserCreate):
 async def get_user(user_id: str):
     return await UserService.get_user(user_id)
 
-# ----- Routes: Prompt Management -----
+# ---- Routes: Prompt Management ----
 @app.post("/prompts/{user_id}")
 async def add_prompt(user_id: str, prompt: str):
     return await PromptService.add_prompt(user_id, prompt)
@@ -113,7 +136,7 @@ async def add_prompt(user_id: str, prompt: str):
 async def get_prompts(user_id: str):
     return await PromptService.get_prompts(user_id)
 
-# ----- Routes: Output Management -----
+# ---- Routes: Output Management ----
 @app.post("/outputs/{user_id}")
 async def add_output(user_id: str, output: str):
     return await OutputService.add_output(user_id, output)
@@ -122,14 +145,34 @@ async def add_output(user_id: str, output: str):
 async def get_outputs(user_id: str):
     return await OutputService.get_outputs(user_id)
 
-# ----- Routes: Content Generation -----
+# ---- Content Generation with Gemini ----
+@app.post("/api/generate_content")
+async def generate_content_endpoint(payload: dict):
+    prompt = payload.get("prompt", "")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=BASE_PROMPT + prompt,
+        )
+        response_text = response.text[7:-3]  # clean response
+        data = json.loads(response_text)
+        return data
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse response from Gemini")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---- YouTube and Article Content (Optional) ----
 @app.post("/api/generate_youtube_content")
 def get_youtube_links(prompt: str) -> dict:
     if not prompt:
         return {"error": "Prompt is required"}
     try:
-        result = generate_youtube_content(prompt)
-        return result
+        return generate_youtube_content(prompt)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -138,13 +181,13 @@ def generate_article(prompt: str) -> dict:
     if not prompt.strip():
         return {"error": "Prompt is required"}
     try:
-        result = fetch_article_links(prompt)
-        return result
-    except json.JSONDecodeError as e:
+        return fetch_article_links(prompt)
+    except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Failed to parse response from Gemini")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+# ---- Certificate Generation ----
 @app.post("/certificate/{user_id}")
 async def certificate(user_id: str, request: Request):
     user = await UserService.get_user(user_id)
@@ -152,30 +195,65 @@ async def certificate(user_id: str, request: Request):
     if not name:
         raise HTTPException(status_code=400, detail="User does not have a first_name")
 
-    file_path = generate_certificate(name)  # e.g., 'generated/Vachan42.png'
+    file_path = generate_certificate(name)
     await OutputService.add_output(user_id, file_path)
 
-    # Remove "generated/" prefix to get the relative path
     relative_path = file_path.split("generated/")[-1]
-
     file_url = request.url_for("generated", path=relative_path)
 
     return {"msg": "Certificate generated", "file": str(file_url)}
 
+# ---- Login Route ----
+@app.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await users_collection.find_one({"email": form_data.username})
+    if not user or user["password"] != form_data.password:
+        raise HTTPException(status_code=400, detail="Invalid email or password")
 
-@app.post("/api/generate_content")
-def generate_content(prompt: str) -> dict:
+    return {
+        "msg": "Login successful",
+        "user_id": user["id"],
+        "email": user["email"],
+    }
+
+# ---- Onboarding Update ----
+@app.put("/users/{user_id}/onboarding")
+async def update_user_onboarding(user_id: str, data: OnboardingUpdate):
+    result = await users_collection.update_one(
+        {"id": user_id},
+        {
+            "$set": {
+                "language": data.language,
+                "skills": data.skills,
+                "street_address": data.street_address,
+                "city": data.city,
+                "state": data.state,
+                "zip_code": data.zip_code,
+                "country": data.country
+            }
+        }
+    )
+    if result.modified_count == 1:
+        return {"msg": "User onboarding updated"}
+    raise HTTPException(status_code=404, detail="User not found")
+
+@app.post("/api/suggest_skills")
+async def suggest_skills(req: SkillSuggestionRequest):
+    prompt = req.prompt.strip()
+
     if not prompt:
-        return {"error": "Prompt is required"}
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=BASE_PROMPT + prompt,
+        model = genai.GenerativeModel("gemini-2.5-pro")
+        response = model.generate_content(
+            f"Based on the user's interest: '{prompt}', suggest 5-10 relevant digital skills. Respond only with a comma-separated list."
         )
-        data = json.loads(response.text[7:-3])
-        return data
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Failed to parse response from Gemini")
+
+        # Extract the skill list
+        skills = [skill.strip() for skill in response.text.split(',') if skill.strip()]
+        return {"skills": skills}
+
     except Exception as e:
+        print(f"❌ Error from Gemini: {e}")
         raise HTTPException(status_code=500, detail=str(e))

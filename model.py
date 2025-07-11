@@ -14,6 +14,8 @@ class UserCreate(BaseModel):
     state: str
     zip_code: str
     country: str
+    language: Optional[str] = None
+    skills: Optional[List[str]] = []
 
 class UserInDB(UserCreate):
     id: str
