@@ -3,6 +3,8 @@ from google import genai
 from dotenv import load_dotenv
 import os
 import json
+from PIL import Image, ImageDraw, ImageFont
+import random
 
 
 load_dotenv()
@@ -28,6 +30,21 @@ def search_youtube(query, max_results=5):
         })
     return videos
 
+def generate_certificate(name: str) -> str:
+    img = Image.open("assets/image.png")  
+    d = ImageDraw.Draw(img)
+    location = (600, 550)  
+    text_color = (18, 48, 134)  
+    font = ImageFont.truetype(
+        "assets/aerial.ttf", 75
+    )
+    d.text(location, name, fill=text_color, font=font)
+    if not os.path.exists("generated"):
+        os.makedirs("generated")
+    #name should replaced by hash from dev
+    file_name = "generated/" + name + ".png"
+    img.save(file_name)
+    return file_name
 
 def generate_youtube_content(query):
     # Step 1: Get YouTube videos

@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+from fastapi import Request, HTTPException
 from google import genai
 import uuid
 import json
@@ -26,6 +28,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/generated", StaticFiles(directory="generated"), name="generated")
 
 # ----- MongoDB Setup -----
 client = AsyncIOMotorClient(MONGO_URL)
@@ -140,6 +144,23 @@ def generate_article(prompt: str) -> dict:
         raise HTTPException(status_code=500, detail="Failed to parse response from Gemini")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/certificate/{user_id}")
+async def certificate(user_id: str, request: Request):
+    user = await UserService.get_user(user_id)
+    name = user.get("first_name")
+    if not name:
+        raise HTTPException(status_code=400, detail="User does not have a first_name")
+
+    file_path = generate_certificate(name)  # e.g., 'generated/Vachan42.png'
+    await OutputService.add_output(user_id, file_path)
+
+    # Remove "generated/" prefix to get the relative path
+    relative_path = file_path.split("generated/")[-1]
+
+    file_url = request.url_for("generated", path=relative_path)
+
+    return {"msg": "Certificate generated", "file": str(file_url)}
 
 
 @app.post("/api/generate_content")
