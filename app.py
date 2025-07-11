@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -11,12 +12,19 @@ import os
 from model import *
 from utils import *
 from config import *
+from passlib.context import CryptContext
+from typing import Optional
+from datetime import datetime, timedelta
+from jose import jwt, JWTError
 
 # ----- Load Environment Variables -----
 load_dotenv()
 MONGO_URL = os.getenv("MONGO_URL")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
 
 # ----- FastAPI App Initialization -----
 app = FastAPI()
@@ -38,6 +46,18 @@ users_collection = db["users"]
 prompts_collection = db["user_prompts"]
 outputs_collection = db["user_outputs"]
 
+# ----- Password Hashing -----
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ----- OAuth2 Setup -----
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
 
 # ----- Services -----
 class UserService:
@@ -50,17 +70,37 @@ class UserService:
         return user
 
     @staticmethod
+    async def get_user_by_email(email: str):
+        user = await users_collection.find_one({"email": email})
+        if not user:
+            return None
+        user["_id"] = str(user["_id"])
+        return user
+
+    @staticmethod
     async def create_user(user: UserCreate):
         user_id = uuid.uuid4().hex
         user_dict = user.dict()
         user_dict["id"] = user_id
-
+        
+        # Hash password
+        user_dict["password"] = pwd_context.hash(user_dict["password"])
+        
         existing = await users_collection.find_one({"email": user.email})
         if existing:
             raise HTTPException(status_code=400, detail="User already exists")
 
         await users_collection.insert_one(user_dict)
         return {"msg": "User created", "id": user_id}
+
+    @staticmethod
+    async def authenticate_user(email: str, password: str):
+        user = await UserService.get_user_by_email(email)
+        if not user:
+            return False
+        if not pwd_context.verify(password, user["password"]):
+            return False
+        return user
 
 class PromptService:
     @staticmethod
@@ -95,11 +135,35 @@ class OutputService:
             return doc
         return {"id": user_id, "outputs": []}
 
-# ----- Routes: User Management -----
-@app.post("/users/")
-async def create_user(user: UserCreate):
+# ----- Routes: Authentication -----
+@app.post("/token")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await UserService.authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Create JWT token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["email"]}, 
+        expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user_id": user["id"]
+    }
+
+@app.post("/signup")
+async def signup(user: UserCreate):
     return await UserService.create_user(user)
 
+# ----- Routes: User Management -----
 @app.get("/users/{user_id}")
 async def get_user(user_id: str):
     return await UserService.get_user(user_id)
@@ -124,7 +188,7 @@ async def get_outputs(user_id: str):
 
 # ----- Routes: Content Generation -----
 @app.post("/api/generate_youtube_content")
-def get_youtube_links(prompt: str) -> dict:
+async def get_youtube_links(prompt: str) -> dict:
     if not prompt:
         return {"error": "Prompt is required"}
     try:
@@ -134,7 +198,7 @@ def get_youtube_links(prompt: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/generate_article")
-def generate_article(prompt: str) -> dict:
+async def generate_article(prompt: str) -> dict:
     if not prompt.strip():
         return {"error": "Prompt is required"}
     try:
@@ -162,9 +226,8 @@ async def certificate(user_id: str, request: Request):
 
     return {"msg": "Certificate generated", "file": str(file_url)}
 
-
 @app.post("/api/generate_content")
-def generate_content(prompt: str) -> dict:
+async def generate_content(prompt: str) -> dict:
     if not prompt:
         return {"error": "Prompt is required"}
     try:
